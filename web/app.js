@@ -20,7 +20,14 @@
     wind: '<path d="M9.6 4.6A2 2 0 1 1 11 8H2"/><path d="M12.6 19.4A2 2 0 1 0 14 16H2"/><path d="M17.7 7.7A2.5 2.5 0 1 1 19.5 12H2"/>',
     rain: '<path d="M20 16.6A5 5 0 0 0 18 7h-1.3A8 8 0 1 0 4 15.3"/><path d="M8 19v2M8 13v2M16 19v2M16 13v2M12 21v2M12 15v2"/>',
     bar: '<path d="M12 14l4-4"/><path d="M3.3 19a10 10 0 1 1 17.4 0"/>',
+    xaf: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
   };
+  const humidex = (t, h) => {
+    if (typeof t !== 'number' || typeof h !== 'number' || t <= -3000 || h <= -3000 || h < 0 || h > 100) return null;
+    const e = 6.112 * Math.exp((17.62 * t) / (243.12 + t)) * (h / 100);
+    return t + 0.5555 * (e - 10);
+  };
+  const xafLevel = (x) => (x < 24 ? 'Sense xafogor' : x < 30 ? 'Xafogor lleugera' : x < 35 ? 'Xafogós' : x < 40 ? 'Molt xafogós' : x < 46 ? 'Sufocant' : 'Perillós');
 
   const VARS = {
     temp: {
@@ -53,8 +60,15 @@
       stops: [[995, '#7b4fc9'], [1008, '#5b8def'], [1013, '#cfd8dc'], [1018, '#f3b45a'], [1030, '#d9542f']],
       ticks: [995, 1005, 1015, 1025],
     },
+    xaf: {
+      label: 'Xafogor (humidex)', tab: 'Xafogor', unit: 'humidex', dec: 1, mdec: 0,
+      get: (d) => humidex(d.temp, d.hum),
+      stops: [[15, '#9ad6e8'], [22, '#7fcf9a'], [27, '#d9e36a'], [30, '#f2c94c'], [35, '#f28c38'], [40, '#d9453a'], [46, '#8e1a5b']],
+      ticks: [20, 25, 30, 35, 40, 45],
+      note: xafLevel,
+    },
   };
-  const REL = { temp: [[2, 38], 6], hum: [[20, 100], 20], wind: [[0, 40], 10], rain: [[0, 20], 2], bar: [[1000, 1030], 4] };
+  const REL = { temp: [[2, 38], 6], hum: [[20, 100], 20], wind: [[0, 40], 10], rain: [[0, 20], 2], bar: [[1000, 1030], 4], xaf: [[18, 44], 4] };
   for (const [k, v] of Object.entries(VARS)) {
     [v.rel, v.minSpan] = REL[k];
     v.stops = v.stops.map(([x, hex]) => [x, [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16))]);
@@ -125,6 +139,7 @@
   L.control.zoom({ position: 'bottomright' }).addTo(map);
   map.attributionControl.setPrefix(false);
   map.setView([41.39, 1.75], 11);
+  new ResizeObserver(() => map.invalidateSize()).observe($('#map'));
 
   const ESRI = 'https://server.arcgisonline.com/ArcGIS/rest/services/';
   const BASES = {
@@ -195,6 +210,7 @@
 
   function drawSurface() {
     const { w, h, pts } = geom;
+    if (w < 2 || h < 2) return;
     sctx.clearRect(0, 0, w, h);
     if (!geom.path) return;
     const vr = VARS[S.varKey];
@@ -327,7 +343,7 @@
   }
   function tipHtml(st) {
     const vr = VARS[S.varKey], v = valOf(st);
-    const val = v == null ? 'Sense dades' : `${fmt(v, vr.dec)} ${vr.unit}`;
+    const val = v == null ? 'Sense dades' : `${fmt(v, vr.dec)} ${vr.unit}${vr.note ? ' · ' + vr.note(v) : ''}`;
     return `<b>${esc(st.nom)}</b><span>${esc(st.municipi)} · ${val}</span>`;
   }
   function initMarkers() {
@@ -370,7 +386,7 @@
     const min = items.reduce((a, x) => (x.v < a.v ? x : a));
     const cell = (k, x, sub) => `<div class="stat"${x ? ` data-id="${x.st.id}"` : ''}><div class="k">${k}</div><div class="v">${fmt(x ? x.v : mean, vr.dec)}<small>${vr.unit}</small></div><div class="n">${sub}</div></div>`;
     $('#summary').innerHTML =
-      cell('Mitjana', null, `${items.length} estacions`) + cell('Màxim', max, esc(max.st.nom)) + cell('Mínim', min, esc(min.st.nom));
+      cell('Mitjana', null, vr.note ? vr.note(mean) : `${items.length} estacions`) + cell('Màxim', max, esc(max.st.nom)) + cell('Mínim', min, esc(min.st.nom));
   }
   function renderList() {
     const vr = VARS[S.varKey];
@@ -385,7 +401,7 @@
       const badge = r.v == null
         ? '<div class="badge off">–</div>'
         : (() => { const c = colorFor(r.v); return `<div class="badge" style="background:${hexOf(c)};color:${inkOn(c)}">${fmt(r.v, vr.mdec === 0 && vr.dec > 0 ? 1 : vr.dec)}</div>`; })();
-      return `<li class="row${S.selected === r.st.id ? ' sel' : ''}" role="option" tabindex="0" data-id="${r.st.id}" aria-selected="${S.selected === r.st.id}">${badge}<div class="txt"><div class="nm">${esc(r.st.nom)}</div><div class="mu">${esc(r.st.municipi)}</div></div><div class="ag">${r.v == null ? agoText(r.age) : ''}</div></li>`;
+      return `<li class="row${S.selected === r.st.id ? ' sel' : ''}" role="option" tabindex="0" data-id="${r.st.id}" aria-selected="${S.selected === r.st.id}">${badge}<div class="txt"><div class="nm">${esc(r.st.nom)}</div><div class="mu">${esc(r.st.municipi)}${vr.note && r.v != null ? ' · ' + vr.note(r.v) : ''}</div></div><div class="ag">${r.v == null ? agoText(r.age) : ''}</div></li>`;
     }).join('');
   }
   function renderLive() {
@@ -436,6 +452,7 @@
     const hi = stat(stats, 'temp_day_max'), lo = stat(stats, 'temp_day_min');
     const cell = (k, v, unit, sub = '') => `<div class="cell"><div class="k">${k}</div><div class="v">${v}${v === '–' ? '' : `<small> ${unit}</small>`}</div>${sub ? `<div class="s">${sub}</div>` : ''}</div>`;
     const off = state === 'off';
+    const hx = humidex(d.temp, d.hum);
     const spdKmh = validNum(d.wspd) ? d.wspd * 3.6 : null, gust = validNum(d.wspdhi) ? d.wspdhi * 3.6 : null;
     const rainDay = stat(stats, 'rain_day_total'), rainMonth = stat(stats, 'rain_month_total');
     box.innerHTML = `
@@ -453,6 +470,8 @@
         ${cell('Ratxa', off || gust == null ? '–' : fmt(gust), 'km/h')}
         ${cell('Pressió', off || !validNum(d.bar) ? '–' : fmt(d.bar, 1), 'hPa')}
         ${cell('Pluja avui', off || !validNum(d.rain) ? '–' : fmt(d.rain, 1), 'mm', rainMonth != null ? `Aquest mes ${fmt(rainMonth, 1)} mm` : '')}
+        ${cell('Xafogor', off || hx == null ? '–' : fmt(hx, 1), 'humidex', off || hx == null ? '' : xafLevel(hx))}
+        ${cell('Radiació solar', off || !validNum(d.solarrad) ? '–' : fmt(d.solarrad), 'W/m²', !off && validNum(d.uvi) ? `Índex UV ${fmt(d.uvi)}` : '')}
       </div>
       <div class="d-foot"><span>${off ? '' : 'Lectura ' + agoText(age)}</span><a class="btn-link" href="https://app.weathercloud.net/d${esc(st.id)}" target="_blank" rel="noopener">Veure a Weathercloud</a></div>`;
     box.classList.remove('hidden');
@@ -513,7 +532,69 @@
     clearTimeout(toastT); toastT = setTimeout(() => t.classList.add('hidden'), 3500);
   }
 
+  /* ------------------------------------------------------------------ radar */
+  const radarPane = map.createPane('radar'); radarPane.style.zIndex = 255; radarPane.style.pointerEvents = 'none';
+  const radar = { on: false, layers: [], times: [], idx: 0, playing: false, timer: 0, refresh: 0 };
+  const ICON_PLAY = '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
+  const ICON_PAUSE = '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>';
+  const hhmm = (t) => new Date(t * 1000).toLocaleTimeString('ca-ES', { hour: '2-digit', minute: '2-digit' });
+
+  function radarShow(i) {
+    radar.idx = i;
+    radar.layers.forEach((l, k) => l.setOpacity(k === i ? 0.8 : 0));
+    $('#radarRange').value = i;
+    $('#radarTime').textContent = radar.times.length ? hhmm(radar.times[i]) : '–';
+    $('#radarAgo').textContent = radar.times.length ? agoText(nowSec() - radar.times[i]) : '';
+  }
+  function radarTick() {
+    clearTimeout(radar.timer);
+    if (!radar.on || !radar.playing) return;
+    const next = (radar.idx + 1) % radar.layers.length;
+    radarShow(next);
+    radar.timer = setTimeout(radarTick, next === radar.layers.length - 1 ? 1800 : 600);
+  }
+  function radarPlay(play) {
+    radar.playing = play;
+    $('#radarPlay').innerHTML = play ? ICON_PAUSE : ICON_PLAY;
+    $('#radarPlay').setAttribute('aria-label', play ? 'Pausa' : 'Reprodueix');
+    clearTimeout(radar.timer);
+    if (play) radar.timer = setTimeout(radarTick, 600);
+  }
+  async function radarLoad() {
+    const r = await fetch('https://api.rainviewer.com/public/weather-maps.json', { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const frames = (j.radar && j.radar.past) || [];
+    if (!frames.length) throw new Error('sense imatges');
+    radar.layers.forEach((l) => map.removeLayer(l));
+    radar.times = frames.map((f) => f.time);
+    radar.layers = frames.map((f) => L.tileLayer(`${j.host}${f.path}/256/{z}/{x}/{y}/2/1_1.png`, {
+      pane: 'radar', opacity: 0, maxNativeZoom: 7, maxZoom: 17, attribution: 'Radar &copy; RainViewer',
+    }).addTo(map));
+    const range = $('#radarRange');
+    range.max = frames.length - 1;
+    radarShow(frames.length - 1);
+  }
+  async function setRadar(on) {
+    radar.on = on; store.set('radar', on ? '1' : '0');
+    $('#radarBtn').classList.toggle('on', on); $('#radarBtn').setAttribute('aria-pressed', on);
+    $('#radarBar').classList.toggle('hidden', !on);
+    clearInterval(radar.refresh); clearTimeout(radar.timer);
+    if (!on) { radar.layers.forEach((l) => map.removeLayer(l)); radar.layers = []; radar.times = []; return; }
+    try {
+      await radarLoad();
+      radarPlay(!reducedMotion);
+      radar.refresh = setInterval(() => radarLoad().catch(() => {}), 5 * 60000);
+    } catch (e) {
+      toast('No s\'ha pogut carregar el radar de pluja.');
+      setRadar(false);
+    }
+  }
+
   /* ---------------------------------------------------------------- events */
+  $('#radarBtn').addEventListener('click', () => setRadar(!radar.on));
+  $('#radarPlay').addEventListener('click', () => radarPlay(!radar.playing));
+  $('#radarRange').addEventListener('input', (e) => { radarPlay(false); radarShow(Number(e.target.value)); });
   $('#tabs').addEventListener('click', (e) => {
     const b = e.target.closest('.tab'); if (!b) return;
     S.varKey = b.dataset.var; store.set('var', S.varKey); renderAll();
@@ -553,12 +634,15 @@
     const ll = comarcaRings().flat().map(([lon, lat]) => [lat, lon]);
     const bounds = L.latLngBounds(ll);
     map.setMaxBounds(bounds.pad(2));
-    const mobile = innerWidth <= 860;
-    map.fitBounds(bounds, mobile ? { paddingTopLeft: [10, 60], paddingBottomRight: [10, innerHeight * 0.48] } : { paddingTopLeft: [420, 30], paddingBottomRight: [30, 30] });
+    map.invalidateSize();
+    const { x: mw, y: mh } = map.getSize();
+    const mobile = mw <= 860;
+    map.fitBounds(bounds, mobile ? { paddingTopLeft: [10, 70], paddingBottomRight: [10, mh * 0.48] } : { paddingTopLeft: [Math.min(420, mw * 0.42), 30], paddingBottomRight: [30, 30] });
     map.setMinZoom(Math.max(9, Math.floor(map.getZoom()) - 1));
     setBase(S.base);
     initMarkers();
     renderAll();
+    if (store.get('radar', '0') === '1') setRadar(true);
     await refresh();
     setInterval(() => refresh(), 60000);
     setInterval(renderLive, 5000);
