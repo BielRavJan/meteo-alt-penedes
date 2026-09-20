@@ -162,10 +162,16 @@
   map.setView([41.39, 1.75], 11);
   let userMoved = false;
   for (const ev of ['mousedown', 'wheel', 'touchstart']) $('#map').addEventListener(ev, () => { userMoved = true; }, { passive: true });
-  new ResizeObserver(() => {
+  let collapsedH = 200, needFit = false;
+  const sheetOpen = () => $('#panel').classList.contains('expanded');
+  const measurePanel = () => { const h = $('#panel').offsetHeight; if (h && !sheetOpen()) collapsedH = h; };
+  const ro = new ResizeObserver(() => {
+    measurePanel();
     map.invalidateSize();
-    if (!userMoved && S.comarques.length) fitSel(false);
-  }).observe($('#map'));
+    if (!userMoved && !S.selected && !sheetOpen() && S.comarques.length) fitSel(false);
+  });
+  ro.observe($('#map'));
+  ro.observe($('#panel'));
 
   const ESRI = 'https://server.arcgisonline.com/ArcGIS/rest/services/';
   const BASES = {
@@ -477,9 +483,9 @@
     $('#deadLbl').textContent = S.showDead ? 'Mostra estacions sense senyal' : `Mostra estacions sense senyal (${dead})`;
   }
   function fitOpts() {
-    const { x: mw, y: mh } = map.getSize();
+    const { x: mw } = map.getSize();
     return mw <= 860
-      ? { paddingTopLeft: [10, 70], paddingBottomRight: [10, mh * 0.48] }
+      ? { paddingTopLeft: [10, 70], paddingBottomRight: [10, collapsedH + 12] }
       : { paddingTopLeft: [Math.min(420, mw * 0.42), 30], paddingBottomRight: [30, 30] };
   }
   function fitSel(animate = true) {
@@ -494,7 +500,13 @@
     const cur = S.stations.find((s) => s.id === S.selected);
     if (cur && !visible(cur)) select(null);
     renderAll();
-    fitSel();
+    if (map.getSize().x <= 860 && sheetOpen()) needFit = true;
+    else fitSel();
+  }
+  function toggleSheet(force) {
+    const open = typeof force === 'boolean' ? force : !sheetOpen();
+    $('#panel').classList.toggle('expanded', open);
+    if (!open) requestAnimationFrame(() => { measurePanel(); if (needFit) { needFit = false; fitSel(); } });
   }
 
   function renderAll() {
@@ -572,6 +584,7 @@
   function select(id, { fly = true } = {}) {
     S.selected = id;
     if (id) {
+      if (innerWidth <= 860) $('#panel').classList.remove('expanded');
       const st = S.stations.find((s) => s.id === id);
       renderDetail();
       loadStats(id);
@@ -713,7 +726,16 @@
     if (cur && !visible(cur)) select(null);
     renderAll();
   });
-  $('#sheetHandle').addEventListener('click', () => $('#panel').classList.toggle('expanded'));
+  $('#sheetHandle').addEventListener('click', () => toggleSheet());
+  let touchY = null;
+  for (const el of [$('#sheetHandle'), $('.brand')]) {
+    el.addEventListener('touchstart', (e) => { touchY = e.touches[0].clientY; }, { passive: true });
+    el.addEventListener('touchend', (e) => {
+      if (touchY == null) return;
+      const dy = e.changedTouches[0].clientY - touchY; touchY = null;
+      if (dy < -30) toggleSheet(true); else if (dy > 30) toggleSheet(false);
+    }, { passive: true });
+  }
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && S.selected) select(null); });
   map.on('click', () => { if (S.selected) select(null); });
   addEventListener('resize', () => map.invalidateSize());
@@ -735,6 +757,8 @@
     setBase(S.base);
     initMarkers();
     renderAll();
+    measurePanel();
+    fitSel(false);
     if (store.get('radar', '0') === '1') setRadar(true);
     await refresh();
     setInterval(() => refresh(), 60000);

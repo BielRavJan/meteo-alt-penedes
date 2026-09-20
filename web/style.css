@@ -238,19 +238,27 @@ h1 { margin: 0; font-size: 19px; letter-spacing: -.01em; }
 @media (max-width: 860px) {
   :root { --panel-w: 100%; }
   .panel {
-    top: auto; left: 0; right: 0; bottom: 0; width: 100%; height: 46vh; border-radius: 20px 20px 0 0;
-    padding: 6px 14px calc(12px + var(--sab)); transition: height .25s;
+    top: auto; left: 0; right: 0; bottom: 0; width: 100%; height: auto; max-height: 88vh; border-radius: 20px 20px 0 0;
+    padding: 2px 12px calc(10px + var(--sab)); gap: 8px;
   }
   .panel.expanded { height: 88vh; }
   .sheet-handle { display: block; align-self: center; width: 100%; height: 22px; border: 0; background: none; flex: none; }
   .sheet-handle span { display: block; width: 40px; height: 4px; margin: 8px auto; border-radius: 4px; background: var(--surface-3); }
-  .foot, .list-head, .legend { display: none; }
-  .panel.expanded .foot, .panel.expanded .list-head, .panel.expanded .legend { display: block; }
-  .panel.expanded .list-head { display: flex; }
+  .panel:not(.expanded) .summary, .panel:not(.expanded) .legend, .panel:not(.expanded) .list-head,
+  .panel:not(.expanded) .list, .panel:not(.expanded) .foot, .panel:not(.expanded) .dead-row { display: none; }
+  .brand { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .live { margin-top: 0; }
+  .live #liveText { display: none; }
+  .panel.expanded .live #liveText { display: inline; }
+  .panel.expanded .brand { flex-wrap: wrap; }
+  .comarques { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin: 0 -12px; padding: 0 12px; }
+  .comarques::-webkit-scrollbar { display: none; }
+  .ccip { flex: none; }
+  .ccip.all { margin-left: 0; }
+  .panel.expanded .comarques { flex-wrap: wrap; overflow: visible; margin: 0; padding: 0; }
   .brand-row .logo { width: 34px; height: 34px; border-radius: 10px; }
   .brand-row .logo svg { width: 22px; height: 22px; }
   h1 { font-size: 16px; }
-  .live { margin-top: 6px; }
   .tab { padding: 6px 2px 5px; }
   .stat .v { font-size: 18px; }
   .map-tools { top: calc(10px + var(--sat)); right: 10px; left: 10px; gap: 6px; }
