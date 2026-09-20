@@ -713,9 +713,7 @@
   $('#comarques').addEventListener('click', (e) => {
     const b = e.target.closest('.ccip'); if (!b) return;
     const id = b.dataset.c;
-    const allOn = COMARCA_IDS.every((c) => S.sel.has(c));
     if (id === 'all') return setSelection(new Set(COMARCA_IDS));
-    if (allOn) return setSelection(new Set([id]));
     const next = new Set(S.sel);
     if (next.has(id)) { if (next.size > 1) next.delete(id); } else next.add(id);
     setSelection(next);
