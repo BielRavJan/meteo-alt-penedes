@@ -91,7 +91,7 @@
   function computeScale() {
     const vr = VARS[S.varKey];
     if (!S.relative) { scale = { lo: vr.min, hi: vr.max, map: (x) => x }; return; }
-    const vals = S.stations.map((st) => valOf(st)).filter((x) => x != null);
+    const vals = vis().map((st) => valOf(st)).filter((x) => x != null);
     if (!vals.length) { scale = { lo: vr.min, hi: vr.max, map: (x) => x }; return; }
     const mid = (Math.min(...vals) + Math.max(...vals)) / 2;
     const span = Math.max(Math.max(...vals) - Math.min(...vals), vr.minSpan);
@@ -106,10 +106,27 @@
   const POINTS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSO', 'SO', 'OSO', 'O', 'ONO', 'NO', 'NNO'];
   const compassName = (deg) => POINTS[Math.round((((deg % 360) + 360) % 360) / 22.5) % 16];
 
+  const COMARQUES = {
+    'alt-penedes': { nom: 'Alt Penedès', color: '#f6a13a' },
+    'baix-penedes': { nom: 'Baix Penedès', color: '#4fb4e8' },
+    'anoia': { nom: 'Anoia', color: '#9ad65c' },
+    'garraf': { nom: 'Garraf', color: '#c084fc' },
+  };
+  const COMARCA_IDS = Object.keys(COMARQUES);
+  const DEAD_AFTER = 30 * 86400;
+  const loadSel = () => {
+    try {
+      const a = JSON.parse(store.get('comarques', 'null'));
+      const ok = Array.isArray(a) ? a.filter((x) => COMARQUES[x]) : [];
+      return new Set(ok.length ? ok : COMARCA_IDS);
+    } catch { return new Set(COMARCA_IDS); }
+  };
+
   const S = {
-    stations: [], comarca: null, live: {}, generated: 0, lastFetch: 0, fetchError: false,
+    stations: [], comarques: [], live: {}, generated: 0, lastFetch: 0, fetchError: false,
     varKey: store.get('var', 'temp'), base: store.get('base', 'dark'), surface: store.get('surface', '1') === '1',
     sort: 'value', query: '', selected: null, relative: store.get('relative', '0') === '1',
+    sel: loadSel(), showDead: store.get('showDead', '0') === '1',
   };
   if (!VARS[S.varKey]) S.varKey = 'temp';
   if (!['dark', 'light', 'sat'].includes(S.base)) S.base = 'dark';
@@ -118,6 +135,10 @@
   const validNum = (x) => typeof x === 'number' && Number.isFinite(x) && x > -3000;
   const ageOf = (st) => { const d = S.live[st.id]; return d && d.epoch ? nowSec() - d.epoch : Infinity; };
   const stateOf = (st) => { const a = ageOf(st); return a <= LIVE_MAX ? 'live' : a <= OLD_MAX ? 'old' : 'off'; };
+  const isDead = (st) => !!S.live[st.id] && ageOf(st) > DEAD_AFTER;
+  const visible = (st) => S.sel.has(st.comarca) && (S.showDead || !isDead(st));
+  const vis = () => S.stations.filter(visible);
+  const srcName = (st) => (st.src === 'xema' ? 'Meteocat' : 'Weathercloud');
   const valOf = (st, key = S.varKey) => {
     const d = S.live[st.id];
     if (!d || stateOf(st) === 'off') return null;
@@ -139,7 +160,12 @@
   L.control.zoom({ position: 'bottomright' }).addTo(map);
   map.attributionControl.setPrefix(false);
   map.setView([41.39, 1.75], 11);
-  new ResizeObserver(() => map.invalidateSize()).observe($('#map'));
+  let userMoved = false;
+  for (const ev of ['mousedown', 'wheel', 'touchstart']) $('#map').addEventListener(ev, () => { userMoved = true; }, { passive: true });
+  new ResizeObserver(() => {
+    map.invalidateSize();
+    if (!userMoved && S.comarques.length) fitSel(false);
+  }).observe($('#map'));
 
   const ESRI = 'https://server.arcgisonline.com/ArcGIS/rest/services/';
   const BASES = {
@@ -171,13 +197,12 @@
   const offscreen = document.createElement('canvas');
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
 
-  let geom = { w: 0, h: 0, path: null, rings: [], pts: [] };
+  const tmpCanvas = document.createElement('canvas');
+  let geom = { w: 0, h: 0, path: null, paths: [], pts: [] };
 
-  function comarcaRings() {
-    const g = S.comarca && S.comarca.geometry;
-    if (!g) return [];
-    return g.type === 'Polygon' ? [g.coordinates[0]] : g.type === 'MultiPolygon' ? g.coordinates.map((p) => p[0]) : [];
-  }
+  const ringsOf = (g) => (g.type === 'Polygon' ? [g.coordinates[0]] : g.type === 'MultiPolygon' ? g.coordinates.map((p) => p[0]) : []);
+  const selectedFeatures = () => S.comarques.filter((f) => S.sel.has(f.properties.id));
+  const fillPaths = (ctx) => { for (const p of geom.paths) ctx.fill(p.path); };
 
   function updateGeom() {
     const size = map.getSize();
@@ -191,14 +216,19 @@
       flowCanvas.style.width = geom.w + 'px'; flowCanvas.style.height = geom.h + 'px';
     }
     const path = new Path2D();
-    geom.rings = comarcaRings().map((ring) => ring.map(([lon, lat]) => map.latLngToContainerPoint([lat, lon])));
-    for (const r of geom.rings) {
-      r.forEach((p, i) => (i ? path.lineTo(p.x, p.y) : path.moveTo(p.x, p.y)));
-      path.closePath();
+    geom.paths = [];
+    for (const f of selectedFeatures()) {
+      const p = new Path2D();
+      for (const ring of ringsOf(f.geometry)) {
+        ring.forEach(([lon, lat], i) => { const q = map.latLngToContainerPoint([lat, lon]); if (i) p.lineTo(q.x, q.y); else p.moveTo(q.x, q.y); });
+        p.closePath();
+      }
+      path.addPath(p);
+      geom.paths.push({ id: f.properties.id, path: p });
     }
     geom.path = path;
     geom.pts = [];
-    for (const st of S.stations) {
+    for (const st of vis()) {
       const v = valOf(st);
       if (v == null) continue;
       const p = map.latLngToContainerPoint([st.lat, st.lon]);
@@ -237,22 +267,31 @@
         }
       }
       octx.putImageData(img, 0, 0);
-      sctx.save();
-      sctx.clip(geom.path);
-      sctx.imageSmoothingEnabled = true; sctx.imageSmoothingQuality = 'high';
-      sctx.drawImage(offscreen, 0, 0, gw * cell, gh * cell);
-      sctx.restore();
+      tmpCanvas.width = w; tmpCanvas.height = h;
+      const tctx = tmpCanvas.getContext('2d');
+      tctx.fillStyle = '#000';
+      fillPaths(tctx);
+      tctx.globalCompositeOperation = 'source-in';
+      tctx.imageSmoothingEnabled = true; tctx.imageSmoothingQuality = 'high';
+      tctx.drawImage(offscreen, 0, 0, gw * cell, gh * cell);
+      sctx.drawImage(tmpCanvas, 0, 0);
     }
-    // atenua l'exterior de la comarca
+    // atenua tot el que queda fora de les comarques seleccionades
+    tmpCanvas.width = w; tmpCanvas.height = h;
+    const mctx = tmpCanvas.getContext('2d');
+    mctx.fillStyle = S.base === 'light' ? 'rgba(232,237,244,.6)' : 'rgba(6,10,20,.55)';
+    mctx.fillRect(0, 0, w, h);
+    mctx.globalCompositeOperation = 'destination-out';
+    mctx.fillStyle = '#000';
+    fillPaths(mctx);
+    sctx.drawImage(tmpCanvas, 0, 0);
     sctx.save();
-    const outer = new Path2D(); outer.rect(-10, -10, w + 20, h + 20); outer.addPath(geom.path);
-    sctx.fillStyle = S.base === 'light' ? 'rgba(232,237,244,.55)' : 'rgba(6,10,20,.5)';
-    sctx.fill(outer, 'evenodd');
-    sctx.restore();
-    sctx.save();
-    sctx.setLineDash([6, 5]); sctx.lineWidth = 1.6; sctx.lineJoin = 'round';
-    sctx.strokeStyle = S.base === 'light' ? 'rgba(15,23,42,.55)' : 'rgba(255,255,255,.6)';
-    sctx.stroke(geom.path);
+    sctx.setLineDash([6, 5]); sctx.lineWidth = 1.8; sctx.lineJoin = 'round';
+    for (const p of geom.paths) {
+      sctx.strokeStyle = COMARQUES[p.id].color;
+      sctx.globalAlpha = 0.9;
+      sctx.stroke(p.path);
+    }
     sctx.restore();
   }
 
@@ -318,7 +357,7 @@
       syncFlow();
     });
   }
-  const applyScale = () => { const z = map.getZoom(); $('#map').style.setProperty('--s', z < 11.5 ? 0.72 : z < 12.5 ? 0.86 : 1); };
+  const applyScale = () => { const z = map.getZoom(); $('#map').style.setProperty('--s', z < 10.75 ? 0.62 : z < 11.5 ? 0.72 : z < 12.5 ? 0.86 : 1); };
   map.on('zoom', applyScale);
   map.on('move resize', scheduleDraw);
   map.on('zoomstart', () => { surfCanvas.style.opacity = 0; flowCanvas.style.opacity = 0; });
@@ -330,10 +369,11 @@
     const vr = VARS[S.varKey];
     const state = stateOf(st), v = valOf(st);
     const sel = S.selected === st.id ? ' sel' : '';
-    if (v == null) return `<div class="mkw${sel}"><div class="mk off" style="width:24px;height:24px;margin:-12px 0 0 -12px" aria-label="${esc(st.nom)}: sense dades"></div></div>`;
+    const sq = st.src === 'xema' ? ' sq' : '';
+    if (v == null) return `<div class="mkw${sel}"><div class="mk off${sq}" style="width:24px;height:24px;margin:-12px 0 0 -12px" aria-label="${esc(st.nom)}: sense dades"></div></div>`;
     const rgb = colorFor(v);
     const txt = fmt(v, vr.mdec);
-    const cls = 'mk' + (txt.length >= 4 ? ' small' : '') + (state === 'old' ? ' old' : '');
+    const cls = 'mk' + sq + (txt.length >= 4 ? ' small' : '') + (state === 'old' ? ' old' : '');
     let arrow = '';
     if (S.varKey === 'wind') {
       const dir = S.live[st.id].wdir;
@@ -344,20 +384,21 @@
   function tipHtml(st) {
     const vr = VARS[S.varKey], v = valOf(st);
     const val = v == null ? 'Sense dades' : `${fmt(v, vr.dec)} ${vr.unit}${vr.note ? ' · ' + vr.note(v) : ''}`;
-    return `<b>${esc(st.nom)}</b><span>${esc(st.municipi)} · ${val}</span>`;
+    return `<b>${esc(st.nom)}</b><span>${esc(st.municipi)} · ${val}</span><span>${COMARQUES[st.comarca].nom} · ${srcName(st)}</span>`;
   }
   function initMarkers() {
     for (const st of S.stations) {
       const m = L.marker([st.lat, st.lon], { icon: L.divIcon({ className: 'mkicon', html: '', iconSize: [60, 60] }), keyboard: true, title: st.nom, riseOnHover: true });
       m.bindTooltip('', { direction: 'top', offset: [0, -22], className: 'tip', opacity: 1 });
       m.on('click', () => select(st.id, { fly: false }));
-      m.addTo(map);
       markers.set(st.id, m);
     }
   }
   function renderMarkers() {
     for (const st of S.stations) {
       const m = markers.get(st.id);
+      if (!visible(st)) { if (map.hasLayer(m)) map.removeLayer(m); continue; }
+      if (!map.hasLayer(m)) m.addTo(map);
       m.setIcon(L.divIcon({ className: 'mkicon', html: markerHtml(st), iconSize: [60, 60] }));
       m.setTooltipContent(tipHtml(st));
       m.setZIndexOffset(S.selected === st.id ? 1000 : Math.round((valOf(st) ?? -1e3) * 0));
@@ -379,7 +420,7 @@
   }
   function renderSummary() {
     const vr = VARS[S.varKey];
-    const items = S.stations.map((st) => ({ st, v: valOf(st) })).filter((x) => x.v != null);
+    const items = vis().map((st) => ({ st, v: valOf(st) })).filter((x) => x.v != null);
     if (!items.length) { $('#summary').innerHTML = '<div class="stat" style="grid-column:1/-1"><div class="n">Sense dades disponibles</div></div>'; return; }
     const mean = items.reduce((a, x) => a + x.v, 0) / items.length;
     const max = items.reduce((a, x) => (x.v > a.v ? x : a));
@@ -391,8 +432,8 @@
   function renderList() {
     const vr = VARS[S.varKey];
     const q = S.query.trim().toLowerCase();
-    let rows = S.stations.map((st) => ({ st, v: valOf(st), age: ageOf(st) }));
-    if (q) rows = rows.filter((r) => (r.st.nom + ' ' + r.st.municipi).toLowerCase().includes(q));
+    let rows = vis().map((st) => ({ st, v: valOf(st), age: ageOf(st) }));
+    if (q) rows = rows.filter((r) => (r.st.nom + ' ' + r.st.municipi + ' ' + COMARQUES[r.st.comarca].nom).toLowerCase().includes(q));
     if (S.sort === 'value') rows.sort((a, b) => (b.v ?? -1e9) - (a.v ?? -1e9));
     else rows.sort((a, b) => a.st.municipi.localeCompare(b.st.municipi, 'ca') || a.st.nom.localeCompare(b.st.nom, 'ca'));
     $('#sortBtn').textContent = S.sort === 'value' ? 'Per valor' : 'Per municipi';
@@ -401,13 +442,14 @@
       const badge = r.v == null
         ? '<div class="badge off">–</div>'
         : (() => { const c = colorFor(r.v); return `<div class="badge" style="background:${hexOf(c)};color:${inkOn(c)}">${fmt(r.v, vr.mdec === 0 && vr.dec > 0 ? 1 : vr.dec)}</div>`; })();
-      return `<li class="row${S.selected === r.st.id ? ' sel' : ''}" role="option" tabindex="0" data-id="${r.st.id}" aria-selected="${S.selected === r.st.id}">${badge}<div class="txt"><div class="nm">${esc(r.st.nom)}</div><div class="mu">${esc(r.st.municipi)}${vr.note && r.v != null ? ' · ' + vr.note(r.v) : ''}</div></div><div class="ag">${r.v == null ? agoText(r.age) : ''}</div></li>`;
+      return `<li class="row${S.selected === r.st.id ? ' sel' : ''}" role="option" tabindex="0" data-id="${r.st.id}" aria-selected="${S.selected === r.st.id}">${badge}<div class="txt"><div class="nm">${esc(r.st.nom)}${r.st.src === 'xema' ? '<span class="src" title="Estació oficial de Meteocat">Meteocat</span>' : ''}</div><div class="mu">${esc(r.st.municipi)}${S.sel.size > 1 ? ' · ' + COMARQUES[r.st.comarca].nom : ''}${vr.note && r.v != null ? ' · ' + vr.note(r.v) : ''}</div></div><div class="ag">${r.v == null ? agoText(r.age) : ''}</div></li>`;
     }).join('');
   }
   function renderLive() {
     const el = $('#live');
-    const online = S.stations.filter((st) => stateOf(st) !== 'off').length;
-    $('#countOnline').textContent = `${online} de ${S.stations.length}`;
+    const shown = vis();
+    const online = shown.filter((st) => stateOf(st) !== 'off').length;
+    $('#countOnline').textContent = `${online} de ${shown.length}`;
     let cls = '', txt;
     if (!S.lastFetch) txt = 'Carregant…';
     else if (S.fetchError) { cls = 'error'; txt = 'Sense connexió amb el servidor'; }
@@ -420,8 +462,44 @@
     $('#liveText').textContent = txt;
   }
 
+  function renderComarques() {
+    const all = COMARCA_IDS.every((id) => S.sel.has(id));
+    const chips = COMARCA_IDS.map((id) => {
+      const n = S.stations.filter((st) => st.comarca === id && (S.showDead || !isDead(st))).length;
+      const on = S.sel.has(id);
+      return `<button class="ccip${on ? ' on' : ''}" data-c="${id}" style="--cc:${COMARQUES[id].color}" aria-pressed="${on}"><i></i>${COMARQUES[id].nom}<b>${n}</b></button>`;
+    }).join('');
+    $('#comarques').innerHTML = chips + `<button class="ccip all${all ? ' on' : ''}" data-c="all" aria-pressed="${all}">Totes</button>`;
+    const dead = S.stations.filter((st) => S.sel.has(st.comarca) && isDead(st)).length;
+    const row = $('#deadRow');
+    row.classList.toggle('hidden', !dead && !S.showDead);
+    $('#deadToggle').checked = S.showDead;
+    $('#deadLbl').textContent = S.showDead ? 'Mostra estacions sense senyal' : `Mostra estacions sense senyal (${dead})`;
+  }
+  function fitOpts() {
+    const { x: mw, y: mh } = map.getSize();
+    return mw <= 860
+      ? { paddingTopLeft: [10, 70], paddingBottomRight: [10, mh * 0.48] }
+      : { paddingTopLeft: [Math.min(420, mw * 0.42), 30], paddingBottomRight: [30, 30] };
+  }
+  function fitSel(animate = true) {
+    const ll = selectedFeatures().flatMap((f) => ringsOf(f.geometry).flat()).map(([lon, lat]) => [lat, lon]);
+    if (!ll.length) return;
+    map.invalidateSize();
+    map.fitBounds(L.latLngBounds(ll), { ...fitOpts(), animate: animate && !reducedMotion });
+  }
+  function setSelection(next) {
+    S.sel = next;
+    store.set('comarques', JSON.stringify([...S.sel]));
+    const cur = S.stations.find((s) => s.id === S.selected);
+    if (cur && !visible(cur)) select(null);
+    renderAll();
+    fitSel();
+  }
+
   function renderAll() {
     computeScale();
+    renderComarques();
     renderLegend(); renderSummary(); renderList(); renderMarkers();
     document.querySelectorAll('.tab').forEach((t) => t.setAttribute('aria-selected', t.dataset.var === S.varKey));
     scheduleDraw();
@@ -453,10 +531,13 @@
     const cell = (k, v, unit, sub = '') => `<div class="cell"><div class="k">${k}</div><div class="v">${v}${v === '–' ? '' : `<small> ${unit}</small>`}</div>${sub ? `<div class="s">${sub}</div>` : ''}</div>`;
     const off = state === 'off';
     const hx = humidex(d.temp, d.hum);
+    const feelRaw = validNum(d.feels) ? d.feels : tv != null && tv < 15 ? d.chill : d.heat ?? d.chill;
+    const feel = validNum(feelRaw) ? feelRaw : null;
+    const link = st.src === 'xema' ? `https://www.meteo.cat/observacions/xema/dades?codi=${esc(st.id)}` : `https://app.weathercloud.net/d${esc(st.id)}`;
     const spdKmh = validNum(d.wspd) ? d.wspd * 3.6 : null, gust = validNum(d.wspdhi) ? d.wspdhi * 3.6 : null;
     const rainDay = stat(stats, 'rain_day_total'), rainMonth = stat(stats, 'rain_month_total');
     box.innerHTML = `
-      <div class="d-head"><div><h2>${esc(st.nom)}</h2><p>${esc(st.municipi)}${st.alt ? ` · ${st.alt} m` : ''}</p></div><button class="d-close" aria-label="Tanca">×</button></div>
+      <div class="d-head"><div><h2>${esc(st.nom)}</h2><p>${esc(st.municipi)} · ${COMARQUES[st.comarca].nom}${st.alt ? ` · ${st.alt} m` : ''}</p></div><button class="d-close" aria-label="Tanca">×</button></div>
       ${off ? `<div class="d-warn">Aquesta estació no envia dades (última lectura ${agoText(age)}).</div>` : ''}
       <div class="d-hero">
         <div class="d-temp" style="${tc ? `color:${hexOf(tc)}` : ''}">${off ? '–' : fmt(tv, 1)}<small>${off ? '' : ' °C'}</small></div>
@@ -464,7 +545,7 @@
         ${compassSvg(off ? null : d.wdir, !off && spdKmh >= 1)}
       </div>
       <div class="grid2">
-        ${cell('Sensació', off || !validNum(d.heat ?? d.chill) ? '–' : fmt(tv != null && tv < 15 ? d.chill : d.heat ?? d.chill, 1), '°C')}
+        ${cell('Sensació', off || feel == null ? '–' : fmt(feel, 1), '°C')}
         ${cell('Humitat', off || !validNum(d.hum) ? '–' : fmt(d.hum), '%', validNum(d.dew) && !off ? `Punt de rosada ${fmt(d.dew, 1)}°` : '')}
         ${cell('Vent', off || spdKmh == null ? '–' : fmt(spdKmh), 'km/h', !off && validNum(d.wdir) ? `de ${compassName(d.wdir)} (${Math.round(d.wdir)}°)` : '')}
         ${cell('Ratxa', off || gust == null ? '–' : fmt(gust), 'km/h')}
@@ -473,7 +554,7 @@
         ${cell('Xafogor', off || hx == null ? '–' : fmt(hx, 1), 'humidex', off || hx == null ? '' : xafLevel(hx))}
         ${cell('Radiació solar', off || !validNum(d.solarrad) ? '–' : fmt(d.solarrad), 'W/m²', !off && validNum(d.uvi) ? `Índex UV ${fmt(d.uvi)}` : '')}
       </div>
-      <div class="d-foot"><span>${off ? '' : 'Lectura ' + agoText(age)}</span><a class="btn-link" href="https://app.weathercloud.net/d${esc(st.id)}" target="_blank" rel="noopener">Veure a Weathercloud</a></div>`;
+      <div class="d-foot"><span>${off ? '' : 'Lectura ' + agoText(age)}<br>Font: ${srcName(st)}</span><a class="btn-link" href="${link}" target="_blank" rel="noopener">Veure a ${srcName(st)}</a></div>`;
     box.classList.remove('hidden');
     box.querySelector('.d-close').addEventListener('click', () => select(null));
   }
@@ -616,6 +697,22 @@
     $('#scaleBtn').classList.toggle('on', S.relative); $('#scaleBtn').setAttribute('aria-pressed', S.relative);
     renderAll();
   });
+  $('#comarques').addEventListener('click', (e) => {
+    const b = e.target.closest('.ccip'); if (!b) return;
+    const id = b.dataset.c;
+    const allOn = COMARCA_IDS.every((c) => S.sel.has(c));
+    if (id === 'all') return setSelection(new Set(COMARCA_IDS));
+    if (allOn) return setSelection(new Set([id]));
+    const next = new Set(S.sel);
+    if (next.has(id)) { if (next.size > 1) next.delete(id); } else next.add(id);
+    setSelection(next);
+  });
+  $('#deadToggle').addEventListener('change', (e) => {
+    S.showDead = e.target.checked; store.set('showDead', S.showDead ? '1' : '0');
+    const cur = S.stations.find((s) => s.id === S.selected);
+    if (cur && !visible(cur)) select(null);
+    renderAll();
+  });
   $('#sheetHandle').addEventListener('click', () => $('#panel').classList.toggle('expanded'));
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && S.selected) select(null); });
   map.on('click', () => { if (S.selected) select(null); });
@@ -628,17 +725,13 @@
     $('#scaleBtn').classList.toggle('on', S.relative); $('#scaleBtn').setAttribute('aria-pressed', S.relative);
     applyScale();
     try {
-      const [st, co] = await Promise.all([fetch('data/estacions.json').then((r) => r.json()), fetch('data/comarca.json').then((r) => r.json())]);
-      S.stations = st; S.comarca = co;
+      const [st, co] = await Promise.all([fetch('data/estacions.json').then((r) => r.json()), fetch('data/comarques.json').then((r) => r.json())]);
+      S.stations = st; S.comarques = co.features;
     } catch (e) { toast('No s\'han pogut carregar les dades de les estacions.'); return; }
-    const ll = comarcaRings().flat().map(([lon, lat]) => [lat, lon]);
-    const bounds = L.latLngBounds(ll);
-    map.setMaxBounds(bounds.pad(2));
-    map.invalidateSize();
-    const { x: mw, y: mh } = map.getSize();
-    const mobile = mw <= 860;
-    map.fitBounds(bounds, mobile ? { paddingTopLeft: [10, 70], paddingBottomRight: [10, mh * 0.48] } : { paddingTopLeft: [Math.min(420, mw * 0.42), 30], paddingBottomRight: [30, 30] });
-    map.setMinZoom(Math.max(9, Math.floor(map.getZoom()) - 1));
+    const all = L.latLngBounds(S.comarques.flatMap((f) => ringsOf(f.geometry).flat()).map(([lon, lat]) => [lat, lon]));
+    map.setMaxBounds(all.pad(1));
+    map.setMinZoom(9);
+    fitSel(false);
     setBase(S.base);
     initMarkers();
     renderAll();

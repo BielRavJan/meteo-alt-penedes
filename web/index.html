@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Meteo Alt Penedès</title>
+<title>Meteo Penedès</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%23f6a13a'/%3E%3Cpath d='M8 20a5 5 0 0 1 5-5 6 6 0 0 1 11 2 3.5 3.5 0 0 1-.5 7H10a3 3 0 0 1-2-4z' fill='white'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<div id="map" aria-label="Mapa de les estacions meteorològiques de l'Alt Penedès"></div>
+<div id="map" aria-label="Mapa de les estacions meteorològiques del Penedès, l'Anoia i el Garraf"></div>
 
 <aside id="panel" class="panel">
   <button id="sheetHandle" class="sheet-handle" aria-label="Mostra o amaga el llistat"><span></span></button>
@@ -19,7 +19,7 @@
         <svg viewBox="0 0 32 32" width="28" height="28"><circle cx="12" cy="11" r="6" fill="#f6a13a"/><path d="M7 25a5 5 0 0 1 5-5 6 6 0 0 1 11 2 3.5 3.5 0 0 1-.5 7H10a3 3 0 0 1-3-4z" fill="#fff" opacity=".95"/></svg>
       </div>
       <div>
-        <h1>Meteo Alt Penedès</h1>
+        <h1>Meteo Penedès</h1>
         <p class="sub"><span id="countOnline">–</span> estacions en línia</p>
       </div>
     </div>
@@ -30,6 +30,9 @@
       </button>
     </div>
   </header>
+
+  <div id="comarques" class="comarques" role="group" aria-label="Comarques"></div>
+  <label id="deadRow" class="dead-row hidden"><input type="checkbox" id="deadToggle"><span id="deadLbl"></span></label>
 
   <nav id="tabs" class="tabs" role="tablist" aria-label="Variable meteorològica"></nav>
 
@@ -42,7 +45,7 @@
     <button id="sortBtn" class="chip-btn" title="Canvia l'ordre"></button>
   </div>
   <ul id="list" class="list" role="listbox" aria-label="Llistat d'estacions"></ul>
-  <footer class="foot">Dades: xarxa <a href="https://weathercloud.net" target="_blank" rel="noopener">Weathercloud</a> · estacions recollides per l'<a href="https://www.iepenedesencs.org/2018/meteo.php" target="_blank" rel="noopener">Institut d'Estudis Penedesencs</a></footer>
+  <footer class="foot">Cercle: <a href="https://weathercloud.net" target="_blank" rel="noopener">Weathercloud</a> (estacions recollides per l'<a href="https://www.iepenedesencs.org/2018/meteo.php" target="_blank" rel="noopener">IEP</a>) · Quadrat: estació oficial del <a href="https://www.meteo.cat" target="_blank" rel="noopener">Servei Meteorològic de Catalunya</a> (XEMA, dades obertes)</footer>
 </aside>
 
 <div class="map-tools" id="mapTools">
