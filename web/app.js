@@ -164,7 +164,11 @@
   for (const ev of ['mousedown', 'wheel', 'touchstart']) $('#map').addEventListener(ev, () => { userMoved = true; }, { passive: true });
   let collapsedH = 200, needFit = false;
   const sheetOpen = () => $('#panel').classList.contains('expanded');
-  const measurePanel = () => { const h = $('#panel').offsetHeight; if (h && !sheetOpen()) collapsedH = h; };
+  const measurePanel = () => {
+    const h = $('#panel').offsetHeight;
+    if (h && !sheetOpen()) { collapsedH = h; document.documentElement.style.setProperty('--sheet-h', h + 'px'); }
+  };
+  const stackH = () => { const b = $('#avisBar'); return b && !b.classList.contains('hidden') && !b.classList.contains('expanded') ? b.offsetHeight + 6 : 0; };
   const ro = new ResizeObserver(() => {
     measurePanel();
     map.invalidateSize();
@@ -172,6 +176,7 @@
   });
   ro.observe($('#map'));
   ro.observe($('#panel'));
+  ro.observe($('#rightStack'));
 
   const ESRI = 'https://server.arcgisonline.com/ArcGIS/rest/services/';
   const BASES = {
@@ -299,6 +304,7 @@
       sctx.stroke(p.path);
     }
     sctx.restore();
+    drawWarnings();
   }
 
   /* --------------------------------------------------------- partícules de vent */
@@ -485,7 +491,7 @@
   function fitOpts() {
     const { x: mw } = map.getSize();
     return mw <= 860
-      ? { paddingTopLeft: [10, 70], paddingBottomRight: [10, collapsedH + 12] }
+      ? { paddingTopLeft: [10, 70 + stackH()], paddingBottomRight: [10, collapsedH + 12] }
       : { paddingTopLeft: [Math.min(420, mw * 0.42), 30], paddingBottomRight: [30, 30] };
   }
   function fitSel(animate = true) {
@@ -512,6 +518,7 @@
   function renderAll() {
     computeScale();
     renderComarques();
+    renderAvisos();
     renderLegend(); renderSummary(); renderList(); renderMarkers();
     document.querySelectorAll('.tab').forEach((t) => t.setAttribute('aria-selected', t.dataset.var === S.varKey));
     scheduleDraw();
@@ -551,6 +558,7 @@
     box.innerHTML = `
       <div class="d-head"><div><h2>${esc(st.nom)}</h2><p>${esc(st.municipi)} · ${COMARQUES[st.comarca].nom}${st.alt ? ` · ${st.alt} m` : ''}</p></div><button class="d-close" aria-label="Tanca">×</button></div>
       ${off ? `<div class="d-warn">Aquesta estació no envia dades (última lectura ${agoText(age)}).</div>` : ''}
+      ${stationWarning(st)}
       <div class="d-hero">
         <div class="d-temp" style="${tc ? `color:${hexOf(tc)}` : ''}">${off ? '–' : fmt(tv, 1)}<small>${off ? '' : ' °C'}</small></div>
         <div class="d-range">${hi != null ? `Màx. avui <b>${fmt(hi, 1)}°</b> ${statTime(stats, 'temp_day_max')}<br>` : ''}${lo != null ? `Mín. avui <b>${fmt(lo, 1)}°</b> ${statTime(stats, 'temp_day_min')}` : ''}</div>
@@ -626,6 +634,185 @@
     clearTimeout(toastT); toastT = setTimeout(() => t.classList.add('hidden'), 3500);
   }
 
+  /* ----------------------------------------------------------------- avisos */
+  // Escala del Meteocat: grau 1-2 perill moderat (groc), 3-4 alt (taronja), 5-6 molt alt (vermell)
+  const WLEVELS = [null,
+    { c: '#ffd300', t: '#1a1400', nom: 'Perill moderat', col: 'groc' },
+    { c: '#e99b15', t: '#1a1000', nom: 'Perill alt', col: 'taronja' },
+    { c: '#cf0920', t: '#ffffff', nom: 'Perill molt alt', col: 'vermell' },
+  ];
+  const wBand = (p) => (p >= 5 ? 3 : p >= 3 ? 2 : p >= 1 ? 1 : 0);
+  const AV = { on: store.get('avisos', '1') === '1', list: [], ok: null, loaded: 0, day: 0, userDay: false, expanded: false, patterns: {}, html: '' };
+  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+
+  const madridNow = () => {
+    const p = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Madrid', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' }).formatToParts(new Date());
+    const g = (t) => p.find((x) => x.type === t).value;
+    return { date: `${g('year')}-${g('month')}-${g('day')}`, hour: Number(g('hour')) };
+  };
+  const addDays = (iso, k) => { const [y, m, d] = iso.split('-').map(Number); return new Date(Date.UTC(y, m - 1, d + k)).toISOString().slice(0, 10); };
+  const avDays = () => { const t = madridNow().date; return [0, 1, 2].map((k) => addDays(t, k)); };
+  const weekday = (iso, style) => new Date(iso + 'T12:00:00Z').toLocaleDateString('ca-ES', { weekday: style, timeZone: 'UTC' });
+  const dayName = (iso, i) => (i === 0 ? 'Avui' : i === 1 ? 'Demà' : cap(weekday(iso, 'long')));
+  const daySub = (iso) => `${weekday(iso, 'short')} ${Number(iso.slice(8))}`;
+  const perHours = (nom) => { const [a, b] = String(nom).split('-').map(Number); return [a, b === 0 ? 24 : b]; };
+  const perLabel = (nom) => { const [a, b] = perHours(nom); return `${String(a).padStart(2, '0')}–${String(b).padStart(2, '0')} h`; };
+  const inRange = (a, iso) => String(a.inici).slice(0, 10) <= iso && iso <= String(a.fi).slice(0, 10);
+
+  function dayLevels(iso) {
+    const lv = {};
+    for (const a of AV.list) {
+      for (const d of a.dies || []) {
+        if (d.dia !== iso) continue;
+        for (const p of d.periodes) for (const [c, v] of Object.entries(p.comarques)) lv[c] = Math.max(lv[c] || 0, v);
+      }
+      if (a.vigilancia && inRange(a, iso)) for (const [c, v] of Object.entries(a.vigilancia)) lv[c] = Math.max(lv[c] || 0, v);
+    }
+    return lv;
+  }
+  const selMax = (lv) => Math.max(0, ...[...S.sel].map((c) => lv[c] || 0));
+
+  function dayItems(iso, only = S.sel) {
+    const items = [];
+    for (const a of AV.list) {
+      const d = (a.dies || []).find((x) => x.dia === iso);
+      const periodes = d ? d.periodes.map((p) => ({ nom: p.nom, com: Object.entries(p.comarques).filter(([c]) => only.has(c)) })).filter((p) => p.com.length) : [];
+      let vig = null;
+      if (!d && a.vigilancia && inRange(a, iso)) { vig = Object.entries(a.vigilancia).filter(([c]) => only.has(c)); if (!vig.length) vig = null; }
+      if (!periodes.length && !vig) continue;
+      const max = Math.max(...periodes.flatMap((p) => p.com.map(([, v]) => v)), ...(vig || []).map(([, v]) => v));
+      items.push({ a, d, periodes, vig, max });
+    }
+    return items.sort((x, y) => y.max - x.max);
+  }
+
+  const lvlChip = (p) => { const L = WLEVELS[wBand(p)]; return `<span class="av-lvl" style="--wc:${L.c};--wt:${L.t}">${L.nom} · ${p}/6</span>`; };
+  const czChip = (c, v) => { const L = WLEVELS[wBand(v)]; return `<span class="cz" style="--wc:${L.c};--wt:${L.t}" title="Grau ${v}/6">${esc(COMARQUES[c].nom)} ${v}</span>`; };
+  const emitted = (s) => { const t = Date.parse(String(s).replace(/Z$/, ':00Z')); return Number.isFinite(t) ? new Date(t).toLocaleString('ca-ES', { day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Madrid' }) : ''; };
+
+  function renderAvisos() {
+    const bar = $('#avisBar'), dot = $('#avisDot'), btn = $('#avisBtn');
+    const days = avDays();
+    const lvls = days.map((iso) => selMax(dayLevels(iso)));
+    const overall = Math.max(...lvls);
+    if (overall > 0) {
+      const L = WLEVELS[wBand(overall)];
+      dot.classList.remove('hidden'); dot.style.setProperty('--wc', L.c); dot.classList.toggle('pulse', wBand(overall) === 3);
+      btn.title = `Avisos del Meteocat: ${L.nom.toLowerCase()} (${overall}/6)`;
+    } else { dot.classList.add('hidden'); btn.title = 'Mostra o amaga els avisos de perill del Meteocat'; }
+    btn.classList.toggle('on', AV.on); btn.setAttribute('aria-pressed', AV.on);
+    if (!AV.on) { bar.classList.add('hidden'); AV.html = ''; afterAvisos(); return; }
+    if (!AV.userDay) AV.day = Math.max(0, lvls.findIndex((l) => l > 0));
+    const iso = days[AV.day];
+    const items = dayItems(iso);
+    const now = madridNow();
+    const icon = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>';
+    let html;
+    if (AV.ok === null) html = `<div class="av-head">${icon}<span class="av-title">Carregant avisos del Meteocat…</span></div>`;
+    else if (AV.ok === false && !AV.list.length) html = `<div class="av-head">${icon}<span class="av-title">No s'han pogut carregar els avisos del Meteocat</span></div>`;
+    else if (overall === 0) html = `<div class="av-head">${icon}<span class="av-title">Sense avisos del Meteocat</span></div><div class="av-sum">Cap avís de perill per a ${S.sel.size === COMARCA_IDS.length ? 'les teves comarques' : 'les comarques seleccionades'} en els pròxims 3 dies.</div>`;
+    else {
+      const tabs = days.map((d, i) => {
+        const b = wBand(lvls[i]);
+        return `<button class="av-day${i === AV.day ? ' on' : ''}" data-i="${i}" style="--dc:${b ? WLEVELS[b].c : 'transparent'}" aria-pressed="${i === AV.day}"><b>${dayName(d, i)}</b><span>${daySub(d)}</span><em>${b ? `${cap(WLEVELS[b].col)} ${lvls[i]}/6` : 'Cap avís'}</em></button>`;
+      }).join('');
+      let sum;
+      if (!items.length) sum = `Cap avís ${AV.day === 0 ? 'avui' : AV.day === 1 ? 'demà' : 'aquest dia'} per a les comarques seleccionades.`;
+      else {
+        const top = items[0];
+        const coms = [...new Set(items.flatMap((it) => it.periodes.flatMap((p) => p.com.map(([c]) => c)).concat((it.vig || []).map(([c]) => c))))];
+        sum = `<b>${WLEVELS[wBand(top.max)].nom} (${top.max}/6)</b> · ${esc(top.a.meteor)}${items.length > 1 ? ` i ${items.length - 1} avís més` : ''}<br>${coms.map((c) => esc(COMARQUES[c].nom)).join(', ')} · ratllat al mapa`;
+      }
+      const list = items.map((it) => {
+        const L = WLEVELS[wBand(it.max)];
+        const rows = it.periodes.map((p) => {
+          const [h0, h1] = perHours(p.nom);
+          const isNow = AV.day === 0 && iso === now.date && now.hour >= h0 && now.hour < h1;
+          return `<li class="${isNow ? 'now' : ''}"><b>${perLabel(p.nom)}</b>${p.com.sort((x, y) => y[1] - x[1]).map(([c, v]) => czChip(c, v)).join('')}</li>`;
+        }).join('') + (it.vig ? `<li><b>Vigent</b>${it.vig.map(([c, v]) => czChip(c, v)).join('')}</li>` : '');
+        const ll = it.d && it.d.llindars.length ? `<p class="av-ll">Llindars: ${it.d.llindars.map((x, k) => `${k + 1}) ${esc(x)}`).join(' · ')}</p>` : '';
+        const com = (it.d && it.d.comentari) || it.a.comentari;
+        return `<article class="av-item" style="--wc:${L.c}">${lvlChip(it.max)}<h3>${esc(it.a.meteor)}</h3><ul class="av-per">${rows}</ul>${ll}${com ? `<p class="av-com">${esc(com)}</p>` : ''}<p class="av-com">${esc(it.a.tipus)} emès el ${emitted(it.a.emissio)}</p></article>`;
+      }).join('');
+      html = `<div class="av-head">${icon}<span class="av-title">Avisos del Meteocat</span>${items.length ? `<button class="av-toggle" aria-expanded="${AV.expanded}">${AV.expanded ? 'Amaga' : 'Detalls'}</button>` : ''}</div>
+        <div class="av-days">${tabs}</div><div class="av-sum">${sum}</div><div class="av-list">${list}</div>`;
+    }
+    html += `<div class="av-foot">Font: <a href="https://www.meteo.cat/" target="_blank" rel="noopener">Servei Meteorològic de Catalunya</a>${AV.loaded ? ' · consultat a les ' + new Date(AV.loaded).toLocaleTimeString('ca-ES', { hour: '2-digit', minute: '2-digit' }) : ''}</div>`;
+    const dayMax = overall > 0 ? (items.length ? items[0].max : 0) : 0;
+    bar.style.setProperty('--wc', dayMax ? WLEVELS[wBand(dayMax)].c : 'var(--border)');
+    bar.classList.toggle('expanded', AV.expanded);
+    if (html !== AV.html) { bar.innerHTML = html; AV.html = html; }
+    bar.classList.remove('hidden');
+    afterAvisos();
+  }
+  function afterAvisos() {
+    requestAnimationFrame(() => {
+      const st = $('#rightStack');
+      const h = [...st.children].some((c) => !c.classList.contains('hidden')) ? st.offsetHeight : 0;
+      document.documentElement.style.setProperty('--stack-h', h ? h + 8 + 'px' : '0px');
+    });
+    scheduleDraw();
+  }
+
+  function warnPattern(band) {
+    if (!AV.patterns[band]) {
+      const c = document.createElement('canvas'); c.width = c.height = 14;
+      const x = c.getContext('2d'), col = WLEVELS[band].c;
+      x.globalAlpha = 0.2; x.fillStyle = col; x.fillRect(0, 0, 14, 14);
+      x.globalAlpha = 0.9; x.strokeStyle = col; x.lineWidth = 3;
+      x.beginPath(); x.moveTo(-2, 16); x.lineTo(16, -2); x.moveTo(-2, 2); x.lineTo(2, -2); x.moveTo(12, 16); x.lineTo(16, 12); x.stroke();
+      AV.patterns[band] = sctx.createPattern(c, 'repeat');
+    }
+    return AV.patterns[band];
+  }
+  function drawWarnings() {
+    if (!AV.on || !AV.list.length) return;
+    const lv = dayLevels(avDays()[AV.day] || avDays()[0]);
+    const o = map.containerPointToLayerPoint([0, 0]).add(map.getPixelOrigin());
+    for (const p of geom.paths) {
+      const b = wBand(lv[p.id] || 0);
+      if (!b) continue;
+      const pat = warnPattern(b);
+      if (pat.setTransform) pat.setTransform(new DOMMatrix([1, 0, 0, 1, -(((o.x % 14) + 14) % 14), -(((o.y % 14) + 14) % 14)]));
+      sctx.save();
+      sctx.fillStyle = pat; sctx.fill(p.path);
+      sctx.lineWidth = 3.5; sctx.lineJoin = 'round'; sctx.strokeStyle = WLEVELS[b].c; sctx.stroke(p.path);
+      sctx.restore();
+    }
+  }
+
+  function stationWarning(st) {
+    if (!AV.on || !AV.list.length) return '';
+    const days = avDays();
+    for (let i = 0; i < 3; i++) {
+      const items = dayItems(days[i], new Set([st.comarca]));
+      if (!items.length) continue;
+      const top = items[0], L = WLEVELS[wBand(top.max)];
+      const when = i === 0 ? 'avui' : i === 1 ? 'demà' : weekday(days[i], 'long');
+      const hours = top.periodes.filter((p) => p.com.some(([, v]) => v === top.max)).map((p) => perLabel(p.nom)).join(', ');
+      return `<div class="d-avis" style="--wc:${L.c}"><b>Avís del Meteocat · ${L.nom.toLowerCase()} (${top.max}/6) ${when}</b><br>${esc(top.a.meteor)}${hours ? ' · ' + hours : ''}</div>`;
+    }
+    return '';
+  }
+
+  async function loadAvisos() {
+    try {
+      const r = await fetch('/api/avisos', { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      AV.list = Array.isArray(j.avisos) ? j.avisos : [];
+      AV.ok = j.ok !== false;
+      AV.loaded = Date.now();
+    } catch { AV.ok = false; }
+    renderAvisos();
+    if (S.selected) renderDetail();
+  }
+  function setAvisos(on) {
+    AV.on = on; store.set('avisos', on ? '1' : '0');
+    renderAvisos();
+    if (S.selected) renderDetail();
+  }
+
   /* ------------------------------------------------------------------ radar */
   const radarPane = map.createPane('radar'); radarPane.style.zIndex = 255; radarPane.style.pointerEvents = 'none';
   const radar = { on: false, layers: [], times: [], idx: 0, playing: false, timer: 0, refresh: 0 };
@@ -686,6 +873,12 @@
   }
 
   /* ---------------------------------------------------------------- events */
+  $('#avisBtn').addEventListener('click', () => setAvisos(!AV.on));
+  $('#avisBar').addEventListener('click', (e) => {
+    const d = e.target.closest('.av-day');
+    if (d) { AV.day = Number(d.dataset.i); AV.userDay = true; renderAvisos(); return; }
+    if (e.target.closest('.av-toggle')) { AV.expanded = !AV.expanded; renderAvisos(); }
+  });
   $('#radarBtn').addEventListener('click', () => setRadar(!radar.on));
   $('#radarPlay').addEventListener('click', () => radarPlay(!radar.playing));
   $('#radarRange').addEventListener('input', (e) => { radarPlay(false); radarShow(Number(e.target.value)); });
@@ -757,11 +950,17 @@
     renderAll();
     measurePanel();
     fitSel(false);
+    loadAvisos();
     if (store.get('radar', '0') === '1') setRadar(true);
     await refresh();
     setInterval(() => refresh(), 60000);
     setInterval(renderLive, 5000);
-    document.addEventListener('visibilitychange', () => { if (!document.hidden && nowSec() - S.lastFetch > 60) refresh(); });
+    setInterval(loadAvisos, 10 * 60000);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) return;
+      if (nowSec() - S.lastFetch > 60) refresh();
+      if (Date.now() - AV.loaded > 10 * 60000) loadAvisos();
+    });
   }
   init();
 })();
