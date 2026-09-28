@@ -629,9 +629,10 @@
     } finally { inflight = false; btn.classList.remove('spin'); }
   }
   let toastT;
-  function toast(msg) {
+  function toast(msg, ms = 3500, color = '') {
     const t = $('#toast'); t.textContent = msg; t.classList.remove('hidden');
-    clearTimeout(toastT); toastT = setTimeout(() => t.classList.add('hidden'), 3500);
+    t.style.borderLeft = color ? `5px solid ${color}` : '';
+    clearTimeout(toastT); toastT = setTimeout(() => t.classList.add('hidden'), ms);
   }
 
   /* ----------------------------------------------------------------- avisos */
@@ -642,7 +643,7 @@
     { c: '#cf0920', t: '#ffffff', nom: 'Perill molt alt', col: 'vermell' },
   ];
   const wBand = (p) => (p >= 5 ? 3 : p >= 3 ? 2 : p >= 1 ? 1 : 0);
-  const AV = { on: store.get('avisos', '1') === '1', list: [], ok: null, loaded: 0, day: 0, userDay: false, expanded: false, patterns: {}, html: '' };
+  const AV = { on: store.get('avisos', '1') === '1', list: [], ok: null, loaded: 0, day: 0, userDay: false, expanded: false, patterns: {}, html: '', fresh: new Set() };
   const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
   const madridNow = () => {
@@ -732,7 +733,7 @@
         }).join('') + (it.vig ? `<li><b>Vigent</b>${it.vig.map(([c, v]) => czChip(c, v)).join('')}</li>` : '');
         const ll = it.d && it.d.llindars.length ? `<p class="av-ll">Llindars: ${it.d.llindars.map((x, k) => `${k + 1}) ${esc(x)}`).join(' · ')}</p>` : '';
         const com = (it.d && it.d.comentari) || it.a.comentari;
-        return `<article class="av-item" style="--wc:${L.c}">${lvlChip(it.max)}<h3>${esc(it.a.meteor)}</h3><ul class="av-per">${rows}</ul>${ll}${com ? `<p class="av-com">${esc(com)}</p>` : ''}<p class="av-com">${esc(it.a.tipus)} emès el ${emitted(it.a.emissio)}</p></article>`;
+        return `<article class="av-item" style="--wc:${L.c}">${lvlChip(it.max)}${AV.fresh.has(avKey(it.a)) ? '<span class="av-new">NOU</span>' : ''}<h3>${esc(it.a.meteor)}</h3><ul class="av-per">${rows}</ul>${ll}${com ? `<p class="av-com">${esc(com)}</p>` : ''}<p class="av-com">${esc(it.a.tipus)} emès el ${emitted(it.a.emissio)}</p></article>`;
       }).join('');
       html = `<div class="av-head">${icon}<span class="av-title">Avisos del Meteocat</span>${items.length ? `<button class="av-toggle" aria-expanded="${AV.expanded}">${AV.expanded ? 'Amaga' : 'Detalls'}</button>` : ''}</div>
         <div class="av-days">${tabs}</div><div class="av-sum">${sum}</div><div class="av-list">${list}</div>`;
@@ -795,6 +796,23 @@
     return '';
   }
 
+  const avKey = (a) => `${a.meteor}|${a.emissio}|${a.tipus}`;
+  const avMax = (a) => Math.max(0, ...(a.dies || []).flatMap((d) => d.periodes.flatMap((p) => Object.values(p.comarques))), ...Object.values(a.vigilancia || {}));
+  function checkNewAvisos() {
+    let seen = null;
+    try { seen = JSON.parse(store.get('avisosVistos', 'null')); } catch { /* ignora */ }
+    const keys = AV.list.map(avKey);
+    store.set('avisosVistos', JSON.stringify(keys));
+    if (!Array.isArray(seen)) return;
+    const fresh = AV.list.filter((a) => !seen.includes(avKey(a)));
+    if (!fresh.length) return;
+    fresh.forEach((a) => AV.fresh.add(avKey(a)));
+    AV.userDay = false;
+    const top = fresh.sort((x, y) => avMax(y) - avMax(x))[0];
+    const L = WLEVELS[wBand(avMax(top))];
+    toast(`Avís nou o actualitzat del Meteocat: ${L.nom.toLowerCase()} (${avMax(top)}/6) · ${top.meteor}`, 12000, L.c);
+    if (!AV.on) $('#avisDot').classList.add('pulse');
+  }
   async function loadAvisos() {
     try {
       const r = await fetch('/api/avisos', { cache: 'no-store' });
@@ -803,6 +821,7 @@
       AV.list = Array.isArray(j.avisos) ? j.avisos : [];
       AV.ok = j.ok !== false;
       AV.loaded = Date.now();
+      if (AV.ok) checkNewAvisos();
     } catch { AV.ok = false; }
     renderAvisos();
     if (S.selected) renderDetail();
@@ -955,11 +974,11 @@
     await refresh();
     setInterval(() => refresh(), 60000);
     setInterval(renderLive, 5000);
-    setInterval(loadAvisos, 10 * 60000);
+    setInterval(loadAvisos, 2 * 60000);
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) return;
       if (nowSec() - S.lastFetch > 60) refresh();
-      if (Date.now() - AV.loaded > 10 * 60000) loadAvisos();
+      if (Date.now() - AV.loaded > 60000) loadAvisos();
     });
   }
   init();
