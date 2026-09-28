@@ -261,12 +261,12 @@ try {
         continue
       }
       if ($path -eq '/api/avisos') {
-        if (-not $avisosCache.body -or ((Get-Date) - $avisosCache.time).TotalSeconds -gt 600) {
+        if (-not $avisosCache.body -or ((Get-Date) - $avisosCache.time).TotalSeconds -gt 120) {
           try { $avisosCache.body = Get-Avisos; $avisosCache.time = Get-Date }
           catch {
             Write-Host "Avisos: $_" -ForegroundColor Yellow
             if (-not $avisosCache.body) { $avisosCache.body = '{"generated":0,"ok":false,"avisos":[]}' }
-            $avisosCache.time = (Get-Date).AddSeconds(-540)
+            $avisosCache.time = (Get-Date).AddSeconds(-60)
           }
         }
         Send-Bytes $ctx ([Text.Encoding]::UTF8.GetBytes($avisosCache.body)) $mime['.json']
