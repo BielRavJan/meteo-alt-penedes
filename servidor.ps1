@@ -146,6 +146,85 @@ function Get-XemaStats([string]$code) {
   $res | ConvertTo-Json -Compress
 }
 
+Add-Type -TypeDefinition @'
+public static class JsonSlice {
+  public static string ArrayAfter(string s, int from) {
+    var m = new System.Text.RegularExpressions.Regex(@"[^A-Za-z]avisos:\s*\[").Match(s, from);
+    if (!m.Success) return null;
+    int start = m.Index + m.Length - 1, depth = 0; bool inStr = false, esc = false;
+    for (int i = start; i < s.Length; i++) {
+      char c = s[i];
+      if (inStr) { if (esc) esc = false; else if (c == '\\') esc = true; else if (c == '"') inStr = false; continue; }
+      if (c == '"') inStr = true;
+      else if (c == '[' || c == '{') depth++;
+      else if (c == ']' || c == '}') { depth--; if (depth == 0) return s.Substring(start, i - start + 1); }
+    }
+    return null;
+  }
+}
+'@
+
+$avisosComarques = @{ 3 = 'alt-penedes'; 6 = 'anoia'; 12 = 'baix-penedes'; 17 = 'garraf' }
+$avisosCache = @{ time = [datetime]::MinValue; body = $null }
+
+function Get-Affected($list) {
+  $com = [ordered]@{}
+  foreach ($x in @($list)) {
+    if ($null -eq $x) { continue }
+    $id = $avisosComarques[[int]$x.idComarca]
+    if ($id -and [int]$x.perill -gt 0) {
+      $p = [int]$x.perill
+      if (-not $com.Contains($id) -or $com[$id] -lt $p) { $com[$id] = $p }
+    }
+  }
+  if ($com.Count) { return $com } else { return $null }
+}
+
+function Get-Avisos {
+  $html = $http.GetStringAsync('https://www.meteo.cat/').GetAwaiter().GetResult()
+  $widget = $html.IndexOf("dom: 'mapaWidget'"); if ($widget -lt 0) { $widget = 0 }
+  $pre = $html.IndexOf('episodisPreavisos', $widget)
+  if ($pre -lt 0) { throw 'format' }
+  $txt = [JsonSlice]::ArrayAfter($html, $pre + 'episodisPreavisos'.Length)
+  if (-not $txt) { throw 'format' }
+  $raw = $txt | ConvertFrom-Json
+  $seen = @{}
+  $out = New-Object System.Collections.ArrayList
+  foreach ($day in @($raw)) {
+    foreach ($ep in @($day)) {
+      foreach ($a in @($ep.avisos)) {
+        if ($null -eq $a -or $a.estat -ne 'Vigent' -or $a.tipus -eq 'Preav' + [char]0xED + 's') { continue }
+        $meteor = if ($ep.meteor -and $ep.meteor.nom) { $ep.meteor.nom } else { 'Av' + [char]0xED + 's' }
+        $key = "$meteor|$($a.dataEmisio)|$($a.tipus)"
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        $dies = New-Object System.Collections.ArrayList
+        foreach ($ev in @($a.evolucions)) {
+          if ($null -eq $ev) { continue }
+          $periodes = New-Object System.Collections.ArrayList
+          foreach ($p in @($ev.periodes)) {
+            if ($null -eq $p) { continue }
+            $com = Get-Affected $p.afectacions
+            if ($com) { [void]$periodes.Add([ordered]@{ nom = $p.nom; comarques = $com }) }
+          }
+          if ($periodes.Count) {
+            $ll = New-Object System.Collections.ArrayList
+            foreach ($l in @($ev.llindar1, $ev.llindar2)) { if ($l) { [void]$ll.Add($l) } }
+            $com2 = if ($ev.comentari) { $ev.comentari } else { '' }
+            [void]$dies.Add([ordered]@{ dia = ([string]$ev.dia).Substring(0, 10); comentari = $com2; llindars = $ll; periodes = $periodes })
+          }
+        }
+        $vig = $null
+        if ($null -eq $a.evolucions) { $vig = Get-Affected $a.afectacions }
+        if ($dies.Count -eq 0 -and -not $vig) { continue }
+        $cm = if ($a.comentari) { $a.comentari } else { '' }
+        [void]$out.Add([ordered]@{ meteor = $meteor; tipus = $a.tipus; emissio = $a.dataEmisio; inici = $a.dataInici; fi = $a.dataFi; comentari = $cm; dies = $dies; vigilancia = $vig })
+      }
+    }
+  }
+  [ordered]@{ generated = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); ok = $true; avisos = $out } | ConvertTo-Json -Depth 10 -Compress
+}
+
 function Send-Bytes($ctx, [byte[]]$bytes, [string]$type, [int]$status = 200) {
   $ctx.Response.StatusCode = $status
   $ctx.Response.ContentType = $type
@@ -179,6 +258,18 @@ try {
       if ($path -eq '/api/dades') {
         $body = if ($shared.cache) { $shared.cache } else { '{"generated":0,"ok":0,"total":0,"values":{}}' }
         Send-Bytes $ctx ([Text.Encoding]::UTF8.GetBytes($body)) $mime['.json']
+        continue
+      }
+      if ($path -eq '/api/avisos') {
+        if (-not $avisosCache.body -or ((Get-Date) - $avisosCache.time).TotalSeconds -gt 600) {
+          try { $avisosCache.body = Get-Avisos; $avisosCache.time = Get-Date }
+          catch {
+            Write-Host "Avisos: $_" -ForegroundColor Yellow
+            if (-not $avisosCache.body) { $avisosCache.body = '{"generated":0,"ok":false,"avisos":[]}' }
+            $avisosCache.time = (Get-Date).AddSeconds(-540)
+          }
+        }
+        Send-Bytes $ctx ([Text.Encoding]::UTF8.GetBytes($avisosCache.body)) $mime['.json']
         continue
       }
       if ($path -match '^/api/estadistiques/([A-Za-z0-9]{2}|\d{10})$') {
